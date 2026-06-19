@@ -6,8 +6,29 @@
     <title>💰 Money Manager</title>
     <link rel="stylesheet" href="css/styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/supabase-config.js"></script>
 </head>
 <body>
+    <!-- Sign In Page -->
+    <section id="authPage" class="auth-page">
+        <div class="auth-card">
+            <h1>Money Manager</h1>
+            <p id="authIntro">Sign in to view and manage your budget.</p>
+            <form id="authForm">
+                <div class="form-row">
+                    <label>Email:</label>
+                    <input type="email" id="authEmail" required autocomplete="email">
+                </div>
+                <div class="form-row">
+                    <label>Password:</label>
+                    <input type="password" id="authPassword" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn primary">Sign In</button>
+            </form>
+            <div id="authStatus" class="status"></div>
+        </div>
+    </section>
     <!-- Navigation Bar -->
     <nav class="nav-bar">
         <button class="nav-btn active" data-page="setup">🏠 Setup</button>
@@ -15,6 +36,11 @@
         <button class="nav-btn" data-page="calendar">📅 Calendar</button>
         <button class="nav-btn" data-page="dashboard">📊 Dashboard</button>
         <button class="nav-btn" data-page="transactions">💳 Transactions</button>
+        <button class="nav-btn admin-only" data-page="admin">Admin</button>
+        <div class="user-panel">
+            <span id="userSummary"></span>
+            <button class="btn" onclick="signOut()">Sign Out</button>
+        </div>
     </nav>
 
     <!-- Setup Page -->
@@ -253,6 +279,22 @@
                 </thead>
                 <tbody></tbody>
             </table>
+        </div>
+    </section>
+
+    <!-- Admin Page -->
+    <section id="admin" class="page admin-only">
+        <h1>ADMIN</h1>
+
+        <div class="card">
+            <h2>User Permissions</h2>
+            <table id="userRolesTable" class="data-table">
+                <thead>
+                    <tr><th>Email</th><th>Role</th><th>Actions</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <div id="adminStatus" class="status"></div>
         </div>
     </section>
 
