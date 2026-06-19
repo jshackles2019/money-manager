@@ -30,6 +30,50 @@ body {
     line-height: 1.6;
 }
 
+/* ===== Auth ===== */
+.auth-page {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.auth-card {
+    width: min(100%, 420px);
+    background: var(--bg-card);
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 1px 8px rgba(0,0,0,0.12);
+}
+
+.auth-card p {
+    color: var(--text-secondary);
+    margin-bottom: 18px;
+}
+
+body:not(.is-authenticated) .nav-bar,
+body:not(.is-authenticated) .page {
+    display: none;
+}
+
+body.is-authenticated .auth-page {
+    display: none;
+}
+
+.user-panel {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+[hidden] {
+    display: none !important;
+}
+
 /* ===== Navigation ===== */
 .nav-bar {
     display: flex;
