@@ -56,12 +56,16 @@ function initAuth() {
 
     if (!supabaseClient) return;
 
-    supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+    supabaseClient.auth.onAuthStateChange((_event, session) => {
         authState.session = session;
         authState.user = session?.user || null;
 
         if (authState.user) {
-            await finishSignIn();
+            setTimeout(() => {
+                finishSignIn().catch(error => {
+                    showStatus('authStatus', error.message, 'error');
+                });
+            }, 0);
         } else {
             authState.profile = null;
             showAuthPage();
@@ -97,7 +101,11 @@ async function signIn(event) {
     showStatus('authStatus', 'Signing in...', 'success');
     const email = document.getElementById('authEmail').value;
     const password = document.getElementById('authPassword').value;
-    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    const { data, error } = await withTimeout(
+        supabaseClient.auth.signInWithPassword({ email, password }),
+        15000,
+        'Sign-in timed out. Check the Supabase URL, publishable key, and your network connection.'
+    );
 
     if (error) {
         showStatus('authStatus', error.message, 'error');
@@ -112,6 +120,15 @@ async function signIn(event) {
     } catch (loadError) {
         showStatus('authStatus', loadError.message, 'error');
     }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(message)), timeoutMs);
+        })
+    ]);
 }
 
 async function signOut() {
