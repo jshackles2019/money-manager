@@ -327,9 +327,15 @@ function renderTransactionTable(transactions) {
 // ===== CALCULATION HELPERS =====
 function getTransactionsForDate(targetDate) {
     const result = [];
-    const target = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+    const targetYear = targetDate.getFullYear();
+    const targetMonth = targetDate.getMonth();
+    const targetDay = targetDate.getDate();
+    
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, target, target);
+        const occurrences = getOccurrences(txn, 
+            new Date(targetYear, targetMonth, targetDay, 0, 0, 0),
+            new Date(targetYear, targetMonth, targetDay, 23, 59, 59)
+        );
         if (occurrences.length > 0) result.push(txn);
     });
     return result;
@@ -337,17 +343,45 @@ function getTransactionsForDate(targetDate) {
 
 function getOccurrences(txn, startRange, endRange) {
     const occurrences = [];
-    const txnStart = new Date(txn.startDate);
-    const txnEnd = txn.endDate ? new Date(txn.endDate) : new Date(endRange.getFullYear() + 1, 11, 31);
+    
+    // Parse the transaction start date (handle both "YYYY-MM-DD" and Date objects)
+    let txnStart;
+    if (typeof txn.startDate === 'string') {
+        const parts = txn.startDate.split('-');
+        txnStart = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    } else {
+        txnStart = new Date(txn.startDate);
+    }
+    
+    // Parse end date if exists
+    let txnEnd;
+    if (txn.endDate) {
+        if (typeof txn.endDate === 'string') {
+            const parts = txn.endDate.split('-');
+            txnEnd = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        } else {
+            txnEnd = new Date(txn.endDate);
+        }
+    } else {
+        txnEnd = new Date(endRange.getFullYear() + 1, 11, 31);
+    }
     
     if (txn.frequency === 'Once') {
-        if (txnStart >= startRange && txnStart <= endRange) {
+        // For one-time transactions, check if the date falls within range
+        if (txnStart >= new Date(startRange.getFullYear(), startRange.getMonth(), startRange.getDate()) && 
+            txnStart <= new Date(endRange.getFullYear(), endRange.getMonth(), endRange.getDate())) {
             occurrences.push(new Date(txnStart));
         }
     } else {
+        // For recurring transactions
         let current = new Date(txnStart);
-        while (current <= endRange && current <= txnEnd) {
-            if (current >= startRange) occurrences.push(new Date(current));
+        const endCheck = new Date(endRange.getFullYear(), endRange.getMonth(), endRange.getDate());
+        const startCheck = new Date(startRange.getFullYear(), startRange.getMonth(), startRange.getDate());
+        
+        while (current <= endCheck && current <= txnEnd) {
+            if (current >= startCheck) {
+                occurrences.push(new Date(current));
+            }
             current = getNextDate(current, txn.frequency);
         }
     }
