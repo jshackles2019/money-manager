@@ -61,9 +61,7 @@ function initAuth() {
         authState.user = session?.user || null;
 
         if (authState.user) {
-            await loadProfile();
-            await loadAppData();
-            showApp();
+            await finishSignIn();
         } else {
             authState.profile = null;
             showAuthPage();
@@ -89,21 +87,30 @@ async function refreshSession() {
         return;
     }
 
-    await loadProfile();
-    await loadAppData();
-    showApp();
+    await finishSignIn();
 }
 
 async function signIn(event) {
     event.preventDefault();
     if (!supabaseClient) return;
 
+    showStatus('authStatus', 'Signing in...', 'success');
     const email = document.getElementById('authEmail').value;
     const password = document.getElementById('authPassword').value;
-    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
 
     if (error) {
         showStatus('authStatus', error.message, 'error');
+        return;
+    }
+
+    authState.session = data.session;
+    authState.user = data.user;
+
+    try {
+        await finishSignIn();
+    } catch (loadError) {
+        showStatus('authStatus', loadError.message, 'error');
     }
 }
 
@@ -113,14 +120,43 @@ async function signOut() {
 }
 
 async function loadProfile() {
-    const { data, error } = await supabaseClient
+    let { data, error } = await supabaseClient
         .from('profiles')
         .select('id, email, role')
         .eq('id', authState.user.id)
-        .single();
+        .maybeSingle();
 
     if (error) throw error;
+
+    if (!data) {
+        const { data: insertedProfile, error: insertError } = await supabaseClient
+            .from('profiles')
+            .insert({
+                id: authState.user.id,
+                email: authState.user.email,
+                role: 'viewer'
+            })
+            .select('id, email, role')
+            .single();
+
+        if (insertError) throw insertError;
+        data = insertedProfile;
+    }
+
     authState.profile = data;
+}
+
+async function finishSignIn() {
+    try {
+        await loadProfile();
+        await loadAppData();
+        showApp();
+    } catch (error) {
+        authState.profile = null;
+        showAuthPage();
+        showStatus('authStatus', `Signed in, but the app could not load your account: ${error.message}`, 'error');
+        throw error;
+    }
 }
 
 async function loadAppData() {
