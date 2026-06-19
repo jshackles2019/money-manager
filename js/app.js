@@ -17,34 +17,262 @@ let state = {
     selectedDate: null
 };
 
+let supabaseClient = null;
+let authState = {
+    session: null,
+    user: null,
+    profile: null,
+    configured: false
+};
+
 // ===== INITIALIZATION =====
-document.addEventListener('DOMContentLoaded', () => {
-    loadFromStorage();
+document.addEventListener('DOMContentLoaded', async () => {
+    initSupabase();
     initNavigation();
     initCategories();
     updateCategories();
     setDefaultDate();
-    renderAll();
+    initAuth();
+    await refreshSession();
 });
 
-function loadFromStorage() {
-    const saved = localStorage.getItem('moneyManager');
-    if (saved) {
-        const data = JSON.parse(saved);
-        state = { ...state, ...data };
-        state.currentMonth = new Date(state.currentMonth);
+function initSupabase() {
+    const config = window.MONEY_MANAGER_SUPABASE || {};
+    const publicKey = config.publishableKey || config.anonKey;
+    authState.configured = Boolean(config.url && publicKey && window.supabase);
+
+    if (!authState.configured) {
+        document.getElementById('authIntro').textContent = 'Supabase is not configured yet. Add your project URL and publishable key in js/supabase-config.js.';
+        showAuthPage();
+        return;
     }
-    document.getElementById('startDate').value = state.startDate;
-    document.getElementById('startingBalance').value = state.startingBalance;
+
+    supabaseClient = window.supabase.createClient(config.url, publicKey);
 }
 
-function saveToStorage() {
-    localStorage.setItem('moneyManager', JSON.stringify({
-        startDate: state.startDate,
-        startingBalance: state.startingBalance,
-        transactions: state.transactions,
-        currentMonth: state.currentMonth.toISOString()
+function initAuth() {
+    const form = document.getElementById('authForm');
+    form.addEventListener('submit', signIn);
+
+    if (!supabaseClient) return;
+
+    supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+        authState.session = session;
+        authState.user = session?.user || null;
+
+        if (authState.user) {
+            await loadProfile();
+            await loadAppData();
+            showApp();
+        } else {
+            authState.profile = null;
+            showAuthPage();
+        }
+    });
+}
+
+async function refreshSession() {
+    if (!supabaseClient) return;
+
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error) {
+        showStatus('authStatus', error.message, 'error');
+        showAuthPage();
+        return;
+    }
+
+    authState.session = data.session;
+    authState.user = data.session?.user || null;
+
+    if (!authState.user) {
+        showAuthPage();
+        return;
+    }
+
+    await loadProfile();
+    await loadAppData();
+    showApp();
+}
+
+async function signIn(event) {
+    event.preventDefault();
+    if (!supabaseClient) return;
+
+    const email = document.getElementById('authEmail').value;
+    const password = document.getElementById('authPassword').value;
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+    if (error) {
+        showStatus('authStatus', error.message, 'error');
+    }
+}
+
+async function signOut() {
+    if (!supabaseClient) return;
+    await supabaseClient.auth.signOut();
+}
+
+async function loadProfile() {
+    const { data, error } = await supabaseClient
+        .from('profiles')
+        .select('id, email, role')
+        .eq('id', authState.user.id)
+        .single();
+
+    if (error) throw error;
+    authState.profile = data;
+}
+
+async function loadAppData() {
+    loadUiPreferences();
+
+    const [{ data: settings, error: settingsError }, { data: transactions, error: transactionsError }] = await Promise.all([
+        supabaseClient.from('settings').select('start_date, starting_balance').eq('id', 1).single(),
+        supabaseClient.from('transactions').select('*').order('start_date', { ascending: true }).order('id', { ascending: true })
+    ]);
+
+    if (settingsError) throw settingsError;
+    if (transactionsError) throw transactionsError;
+
+    state.startDate = settings.start_date;
+    state.startingBalance = Number(settings.starting_balance);
+    state.transactions = (transactions || []).map(fromDatabaseTransaction);
+
+    document.getElementById('startDate').value = state.startDate;
+    document.getElementById('startingBalance').value = state.startingBalance;
+    renderAll();
+    applyPermissions();
+}
+
+function loadUiPreferences() {
+    const saved = localStorage.getItem('moneyManagerUi');
+    if (!saved) return;
+
+    const data = JSON.parse(saved);
+    if (data.currentMonth) state.currentMonth = new Date(data.currentMonth);
+    if (data.selectedDate) state.selectedDate = data.selectedDate;
+}
+
+function saveUiPreferences() {
+    localStorage.setItem('moneyManagerUi', JSON.stringify({
+        currentMonth: state.currentMonth.toISOString(),
+        selectedDate: state.selectedDate
     }));
+}
+
+function fromDatabaseTransaction(txn) {
+    return {
+        id: txn.id,
+        description: txn.description,
+        type: txn.type,
+        category: txn.category,
+        amount: Number(txn.amount),
+        startDate: txn.start_date,
+        frequency: txn.frequency,
+        endDate: txn.end_date
+    };
+}
+
+function toDatabaseTransaction(txn) {
+    return {
+        description: txn.description,
+        type: txn.type,
+        category: txn.category,
+        amount: txn.amount,
+        start_date: txn.startDate,
+        frequency: txn.frequency,
+        end_date: txn.endDate || null,
+        updated_by: authState.user.id
+    };
+}
+
+function canEdit() {
+    return ['editor', 'admin'].includes(authState.profile?.role);
+}
+
+function isAdmin() {
+    return authState.profile?.role === 'admin';
+}
+
+function requireEditPermission(statusElementId = 'txnStatus') {
+    if (canEdit()) return true;
+    showStatus(statusElementId, 'You have view-only access. Ask an administrator for editor access to make changes.', 'error');
+    return false;
+}
+
+function showAuthPage() {
+    document.body.classList.remove('is-authenticated');
+    document.body.classList.add('is-signed-out');
+}
+
+function showApp() {
+    document.body.classList.add('is-authenticated');
+    document.body.classList.remove('is-signed-out');
+    document.getElementById('userSummary').textContent = `${authState.profile.email || authState.user.email} (${authState.profile.role})`;
+    applyPermissions();
+}
+
+function applyPermissions() {
+    document.body.dataset.role = authState.profile?.role || 'viewer';
+
+    document.querySelectorAll('.admin-only').forEach(el => {
+        el.hidden = !isAdmin();
+    });
+
+    document.querySelectorAll('#transactionForm input, #transactionForm select, #transactionForm button').forEach(el => {
+        el.disabled = !canEdit();
+    });
+
+    document.querySelectorAll('#startDate, #startingBalance').forEach(el => {
+        el.disabled = !canEdit();
+    });
+}
+
+async function renderAdmin() {
+    if (!isAdmin()) return;
+
+    const { data, error } = await supabaseClient
+        .from('profiles')
+        .select('id, email, role')
+        .order('email', { ascending: true });
+
+    if (error) {
+        showStatus('adminStatus', error.message, 'error');
+        return;
+    }
+
+    const tbody = document.querySelector('#userRolesTable tbody');
+    tbody.innerHTML = data.map(user => `
+        <tr>
+            <td>${user.email || user.id}</td>
+            <td>
+                <select id="role-${user.id}">
+                    <option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>Viewer</option>
+                    <option value="editor" ${user.role === 'editor' ? 'selected' : ''}>Editor</option>
+                    <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
+                </select>
+            </td>
+            <td><button class="btn primary" onclick="updateUserRole('${user.id}')">Save</button></td>
+        </tr>
+    `).join('');
+}
+
+async function updateUserRole(userId) {
+    if (!isAdmin()) return;
+
+    const role = document.getElementById(`role-${userId}`).value;
+    const { error } = await supabaseClient
+        .from('profiles')
+        .update({ role, updated_at: new Date().toISOString() })
+        .eq('id', userId);
+
+    if (error) {
+        showStatus('adminStatus', error.message, 'error');
+        return;
+    }
+
+    showStatus('adminStatus', 'User role updated.', 'success');
+    await renderAdmin();
 }
 
 // ===== NAVIGATION =====
@@ -58,6 +286,7 @@ function initNavigation() {
             document.getElementById(pageId).classList.add('active');
             if (pageId === 'dashboard') renderDashboard();
             if (pageId === 'calendar') renderCalendar();
+            if (pageId === 'admin') renderAdmin();
         });
     });
 }
@@ -70,10 +299,27 @@ function initCategories() {
     expenseList.innerHTML = CONFIG.expenseCategories.map(c => `<li>${c}</li>`).join('');
 }
 
-function saveSetup() {
+async function saveSetup() {
+    if (!requireEditPermission('importStatus')) return;
+
     state.startDate = document.getElementById('startDate').value;
     state.startingBalance = parseFloat(document.getElementById('startingBalance').value) || 0;
-    saveToStorage();
+
+    const { error } = await supabaseClient
+        .from('settings')
+        .update({
+            start_date: state.startDate,
+            starting_balance: state.startingBalance,
+            updated_by: authState.user.id,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', 1);
+
+    if (error) {
+        showStatus('importStatus', error.message, 'error');
+        return;
+    }
+
     renderAll();
     showStatus('importStatus', 'Settings saved successfully!', 'success');
 }
@@ -91,10 +337,11 @@ function setDefaultDate() {
     document.getElementById('txnStartDate').value = today;
 }
 
-function addTransaction(event) {
+async function addTransaction(event) {
     event.preventDefault();
+    if (!requireEditPermission('txnStatus')) return;
+
     const transaction = {
-        id: Date.now(),
         description: document.getElementById('txnDescription').value,
         type: document.getElementById('txnType').value,
         category: document.getElementById('txnCategory').value,
@@ -103,8 +350,19 @@ function addTransaction(event) {
         frequency: document.getElementById('txnFrequency').value,
         endDate: document.getElementById('txnEndDate').value || null
     };
-    state.transactions.push(transaction);
-    saveToStorage();
+
+    const { data, error } = await supabaseClient
+        .from('transactions')
+        .insert({ ...toDatabaseTransaction(transaction), created_by: authState.user.id })
+        .select()
+        .single();
+
+    if (error) {
+        showStatus('txnStatus', error.message, 'error');
+        return;
+    }
+
+    state.transactions.push(fromDatabaseTransaction(data));
     document.getElementById('transactionForm').reset();
     updateCategories();
     setDefaultDate();
@@ -112,11 +370,18 @@ function addTransaction(event) {
     renderAll();
 }
 
-function deleteTransaction(id) {
+async function deleteTransaction(id) {
+    if (!requireEditPermission('txnStatus')) return;
+
     const txn = state.transactions.find(t => t.id === id);
     if (confirm(`Delete transaction "${txn.description}"?`)) {
+        const { error } = await supabaseClient.from('transactions').delete().eq('id', id);
+        if (error) {
+            showStatus('txnStatus', error.message, 'error');
+            return;
+        }
+
         state.transactions = state.transactions.filter(t => t.id !== id);
-        saveToStorage();
         renderAll();
     }
 }
@@ -131,7 +396,7 @@ function renderRecentTransactions() {
             <td>${t.category}</td>
             <td class="${t.type === 'Income' ? 'income' : 'expense'}">${formatCurrency(t.amount)}</td>
             <td>${formatDate(t.startDate)}</td>
-            <td><button class="btn danger" onclick="deleteTransaction(${t.id})">🗑️</button></td>
+            <td>${canEdit() ? `<button class="btn danger" onclick="deleteTransaction(${t.id})">Delete</button>` : '-'}</td>
         </tr>
     `).join('');
 }
@@ -139,7 +404,7 @@ function renderRecentTransactions() {
 // ===== CALENDAR PAGE =====
 function changeMonth(delta) {
     state.currentMonth.setMonth(state.currentMonth.getMonth() + delta);
-    saveToStorage();
+    saveUiPreferences();
     renderCalendar();
 }
 
@@ -193,7 +458,7 @@ function renderCalendar() {
 
 function selectDate(year, month, day) {
     state.selectedDate = new Date(year, month, day).toISOString();
-    saveToStorage();
+    saveUiPreferences();
     renderCalendar();
     renderSelectedDateTransactions();
 }
@@ -319,7 +584,7 @@ function renderTransactionTable(transactions) {
             <td>${formatDate(t.startDate)}</td>
             <td>${t.frequency}</td>
             <td>${t.endDate ? formatDate(t.endDate) : '-'}</td>
-            <td><button class="btn danger" onclick="deleteTransaction(${t.id})">🗑️</button></td>
+            <td>${canEdit() ? `<button class="btn danger" onclick="deleteTransaction(${t.id})">Delete</button>` : '-'}</td>
         </tr>
     `).join('');
 }
@@ -634,30 +899,69 @@ function showImportConfirmation(data) {
     document.body.appendChild(modal);
 }
 
-function confirmImport() {
+async function confirmImport() {
+    if (!requireEditPermission('importStatus')) {
+        closeModal();
+        return;
+    }
+
     const data = window.pendingImportData;
     if (!data) {
         closeModal();
         return;
     }
-    
-    // Update state with imported data
+
+    const importedTransactions = data.transactions.map(t => ({
+        description: t.description,
+        type: t.type,
+        category: t.category,
+        amount: Number(t.amount),
+        startDate: t.startDate,
+        frequency: t.frequency,
+        endDate: t.endDate || null
+    }));
+
+    const { error: deleteError } = await supabaseClient.from('transactions').delete().neq('id', 0);
+    if (deleteError) {
+        showStatus('importStatus', deleteError.message, 'error');
+        return;
+    }
+
+    const { error: settingsError } = await supabaseClient
+        .from('settings')
+        .update({
+            start_date: data.startDate || state.startDate,
+            starting_balance: data.startingBalance || state.startingBalance,
+            updated_by: authState.user.id,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', 1);
+
+    if (settingsError) {
+        showStatus('importStatus', settingsError.message, 'error');
+        return;
+    }
+
+    if (importedTransactions.length > 0) {
+        const rows = importedTransactions.map(t => ({
+            ...toDatabaseTransaction(t),
+            created_by: authState.user.id
+        }));
+        const { error: insertError } = await supabaseClient.from('transactions').insert(rows);
+        if (insertError) {
+            showStatus('importStatus', insertError.message, 'error');
+            return;
+        }
+    }
+
     state.startDate = data.startDate || state.startDate;
     state.startingBalance = data.startingBalance || state.startingBalance;
-    state.transactions = data.transactions;
-    
-    // Ensure all transactions have IDs
-    state.transactions.forEach((t, index) => {
-        if (!t.id) t.id = Date.now() + index;
-    });
-    
+
     // Update the setup form
     document.getElementById('startDate').value = state.startDate;
     document.getElementById('startingBalance').value = state.startingBalance;
     
-    // Save and refresh
-    saveToStorage();
-    renderAll();
+    await loadAppData();
     
     // Clean up
     delete window.pendingImportData;
@@ -674,15 +978,37 @@ function closeModal() {
 }
 
 // ===== CLEAR DATA FUNCTION =====
-function clearAllData() {
+async function clearAllData() {
+    if (!requireEditPermission('importStatus')) return;
     if (confirm('⚠️ Are you sure you want to delete ALL transactions? This cannot be undone!')) {
         if (confirm('🔴 FINAL WARNING: Click OK to permanently delete all data.')) {
+            const newStartDate = new Date().toISOString().split('T')[0];
+            const { error: deleteError } = await supabaseClient.from('transactions').delete().neq('id', 0);
+            if (deleteError) {
+                showStatus('importStatus', deleteError.message, 'error');
+                return;
+            }
+
+            const { error: settingsError } = await supabaseClient
+                .from('settings')
+                .update({
+                    start_date: newStartDate,
+                    starting_balance: 0,
+                    updated_by: authState.user.id,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', 1);
+
+            if (settingsError) {
+                showStatus('importStatus', settingsError.message, 'error');
+                return;
+            }
+
             state.transactions = [];
-            state.startDate = new Date().toISOString().split('T')[0];
+            state.startDate = newStartDate;
             state.startingBalance = 0;
             document.getElementById('startDate').value = state.startDate;
             document.getElementById('startingBalance').value = state.startingBalance;
-            saveToStorage();
             renderAll();
             showStatus('importStatus', '🗑️ All data cleared.', 'success');
         }
