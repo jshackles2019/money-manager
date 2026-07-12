@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="css/styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
     <script src="js/supabase-config.js"></script>
 </head>
 <body>
@@ -58,6 +59,47 @@
                 <input type="number" id="startingBalance" value="2316.00" step="0.01">
             </div>
             <button class="btn primary" onclick="saveSetup()">💾 Save Settings</button>
+        </div>
+
+        <div class="card">
+            <h2>🏦 BANK CONNECTIONS</h2>
+            <p style="margin-bottom: 16px; color: var(--text-secondary);">
+                Connect your bank accounts to sync balances and transactions automatically.
+            </p>
+
+            <div class="bank-actions">
+                <button class="btn primary bank-link-action" onclick="connectPriorityBank('randolf-broofs-fcu')">
+                    Connect Randolf Broofs Federal Credit Union
+                </button>
+                <button class="btn primary bank-link-action" onclick="connectPriorityBank('onepay-financial')">
+                    Connect OnePay Financial
+                </button>
+                <button class="btn bank-link-action" onclick="connectBank()">
+                    Connect Another Bank
+                </button>
+                <button class="btn bank-link-action" onclick="syncBankTransactions()">
+                    Sync Bank Data Now
+                </button>
+            </div>
+
+            <div id="bankLinkStatus" class="status"></div>
+
+            <h3 style="margin-top: 14px;">Connected Accounts</h3>
+            <table id="bankConnectionsTable" class="data-table">
+                <thead>
+                    <tr>
+                        <th>Institution</th>
+                        <th>Status</th>
+                        <th>Accounts</th>
+                        <th>Last Sync</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: var(--text-secondary);">No bank connections yet.</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
 
         <div class="card">
@@ -285,6 +327,40 @@
     <!-- Admin Page -->
     <section id="admin" class="page admin-only">
         <h1>ADMIN</h1>
+
+        <div class="card">
+            <h2>Bank Support Diagnostics</h2>
+            <p style="margin-bottom: 12px; color: var(--text-secondary);">
+                Live provider support checks for priority institutions.
+            </p>
+            <button class="btn primary" onclick="loadBankSupportDiagnostics()">Refresh Diagnostics</button>
+            <table id="bankSupportTable" class="data-table" style="margin-top: 12px;">
+                <thead>
+                    <tr><th>Institution</th><th>Support</th><th>Matched Name</th><th>Institution ID</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">No diagnostics run yet.</td></tr>
+                </tbody>
+            </table>
+            <div id="bankSupportStatus" class="status"></div>
+        </div>
+
+        <div class="card">
+            <h2>Webhook Events</h2>
+            <p style="margin-bottom: 12px; color: var(--text-secondary);">
+                Recent webhook processing history, including duplicates and failures.
+            </p>
+            <button class="btn" onclick="loadWebhookEvents()">Refresh Webhook Events</button>
+            <table id="webhookEventsTable" class="data-table" style="margin-top: 12px;">
+                <thead>
+                    <tr><th>Created</th><th>Type</th><th>Code</th><th>Status</th><th>Item</th><th>Error</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No webhook events loaded yet.</td></tr>
+                </tbody>
+            </table>
+            <div id="webhookEventsStatus" class="status"></div>
+        </div>
 
         <div class="card">
             <h2>User Permissions</h2>

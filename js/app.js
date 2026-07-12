@@ -8,11 +8,36 @@ const CONFIG = {
     frequencies: ['Once', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'Yearly']
 };
 
+const BANK_LINKING = {
+    priorityInstitutions: [
+        {
+            key: 'randolf-broofs-fcu',
+            name: 'Randolf Broofs Federal Credit Union',
+            aliases: [
+                'Randolf Broofs Federal Credit Union',
+                'Randolph-Brooks Federal Credit Union',
+                'Randolph Brooks Federal Credit Union',
+                'RBFCU'
+            ]
+        },
+        {
+            key: 'onepay-financial',
+            name: 'OnePay Financial',
+            aliases: [
+                'OnePay Financial',
+                'One Pay Financial',
+                'OnePay'
+            ]
+        }
+    ]
+};
+
 // ===== STATE =====
 let state = {
     startDate: '2026-06-17',
     startingBalance: 2316.00,
     transactions: [],
+    bankConnections: [],
     currentMonth: new Date(2026, 5, 1),
     selectedDate: null
 };
@@ -30,6 +55,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initSupabase();
     initNavigation();
     initCategories();
+    initBankLinking();
     updateCategories();
     setDefaultDate();
     initAuth();
@@ -191,6 +217,8 @@ async function loadAppData() {
     state.startingBalance = Number(settings.starting_balance);
     state.transactions = (transactions || []).map(fromDatabaseTransaction);
 
+    await loadBankConnections();
+
     document.getElementById('startDate').value = state.startDate;
     document.getElementById('startingBalance').value = state.startingBalance;
     renderAll();
@@ -279,10 +307,17 @@ function applyPermissions() {
     document.querySelectorAll('#startDate, #startingBalance').forEach(el => {
         el.disabled = !canEdit();
     });
+
+    document.querySelectorAll('.bank-link-action').forEach(el => {
+        el.disabled = !canEdit();
+    });
 }
 
 async function renderAdmin() {
     if (!isAdmin()) return;
+
+    await loadBankSupportDiagnostics();
+    await loadWebhookEvents();
 
     const { data, error } = await supabaseClient
         .from('profiles')
@@ -375,6 +410,300 @@ async function saveSetup() {
 
     renderAll();
     showStatus('importStatus', 'Settings saved successfully!', 'success');
+}
+
+// ===== BANK LINKING =====
+function initBankLinking() {
+    renderBankConnections();
+}
+
+function getPriorityInstitutionByKey(bankKey) {
+    return BANK_LINKING.priorityInstitutions.find(inst => inst.key === bankKey) || null;
+}
+
+function normalizeInstitutionName(name) {
+    return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function findPriorityInstitutionMatch(name) {
+    const normalized = normalizeInstitutionName(name);
+    if (!normalized) return null;
+
+    return BANK_LINKING.priorityInstitutions.find(inst =>
+        inst.aliases.some(alias => normalizeInstitutionName(alias) === normalized)
+    ) || null;
+}
+
+async function loadBankConnections() {
+    if (!supabaseClient || !authState.user) {
+        state.bankConnections = [];
+        renderBankConnections();
+        return;
+    }
+
+    const { data, error } = await supabaseClient
+        .from('financial_items')
+        .select('id, institution_name, status, accounts_count, last_sync_at')
+        .order('created_at', { ascending: false });
+
+    if (error) {
+        // Relation missing is expected before the migration has been applied.
+        if (error.code === '42P01') {
+            state.bankConnections = [];
+            renderBankConnections();
+            return;
+        }
+
+        showStatus('bankLinkStatus', error.message, 'error');
+        state.bankConnections = [];
+        renderBankConnections();
+        return;
+    }
+
+    state.bankConnections = data || [];
+    renderBankConnections();
+}
+
+function renderBankConnections() {
+    const tbody = document.querySelector('#bankConnectionsTable tbody');
+    if (!tbody) return;
+
+    if (!state.bankConnections.length) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="4" style="text-align: center; color: var(--text-secondary);">No bank connections yet.</td>
+            </tr>
+        `;
+        return;
+    }
+
+    tbody.innerHTML = state.bankConnections.map(item => {
+        const matched = findPriorityInstitutionMatch(item.institution_name);
+        const institutionLabel = matched
+            ? `${item.institution_name} (Priority)`
+            : (item.institution_name || 'Unknown institution');
+        const statusClass = (item.status || '').toLowerCase();
+        const statusText = item.status || 'unknown';
+        return `
+            <tr>
+                <td>${institutionLabel}</td>
+                <td><span class="connection-status ${statusClass}">${statusText}</span></td>
+                <td>${item.accounts_count || 0}</td>
+                <td>${item.last_sync_at ? formatDate(item.last_sync_at) : '-'}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function invokeEdgeFunction(functionName, payload) {
+    const { data, error } = await supabaseClient.functions.invoke(functionName, {
+        body: payload
+    });
+
+    if (error) {
+        throw new Error(error.message || `Failed to call function: ${functionName}`);
+    }
+
+    return data || {};
+}
+
+async function connectPriorityBank(bankKey) {
+    const institution = getPriorityInstitutionByKey(bankKey);
+    if (!institution) {
+        showStatus('bankLinkStatus', 'Unknown bank target.', 'error');
+        return;
+    }
+
+    await connectBank(institution);
+}
+
+async function connectBank(preferredInstitution = null) {
+    if (!requireEditPermission('bankLinkStatus')) return;
+    if (!supabaseClient || !authState.user) {
+        showStatus('bankLinkStatus', 'Sign in before connecting a bank.', 'error');
+        return;
+    }
+
+    if (!window.Plaid) {
+        showStatus('bankLinkStatus', 'Bank-linking library did not load. Use JSON import for now.', 'error');
+        return;
+    }
+
+    try {
+        const bankName = preferredInstitution?.name;
+        showStatus('bankLinkStatus', bankName ? `Preparing secure link for ${bankName}...` : 'Preparing secure bank link...', 'success');
+
+        const createResponse = await invokeEdgeFunction('create-link-token', {
+            preferred_institution_name: bankName || null,
+            preferred_institution_aliases: preferredInstitution?.aliases || [],
+            priority_institutions: BANK_LINKING.priorityInstitutions
+        });
+
+        const linkToken = createResponse.link_token;
+        const supportStatus = createResponse.support_status || 'unknown';
+        if (!linkToken) {
+            openManualImportFallback(bankName, supportStatus);
+            return;
+        }
+
+        if (supportStatus === 'unsupported') {
+            showStatus('bankLinkStatus', `${bankName || 'This institution'} may not be directly supported. You can still search in Plaid Link or use JSON import.`, 'error');
+        }
+
+        const handler = window.Plaid.create({
+            token: linkToken,
+            onSuccess: async (publicToken, metadata) => {
+                await exchangePublicToken(publicToken, metadata, preferredInstitution);
+            },
+            onExit: (_err, metadata) => {
+                if (metadata?.status === 'institution_not_found') {
+                    openManualImportFallback(bankName, 'unsupported');
+                    return;
+                }
+
+                showStatus('bankLinkStatus', 'Bank linking was canceled.', 'error');
+            }
+        });
+
+        handler.open();
+    } catch (error) {
+        openManualImportFallback(preferredInstitution?.name, 'unknown', error.message);
+    }
+}
+
+async function syncBankTransactions() {
+    if (!requireEditPermission('bankLinkStatus')) return;
+    if (!supabaseClient || !authState.user) {
+        showStatus('bankLinkStatus', 'Sign in before syncing bank data.', 'error');
+        return;
+    }
+
+    try {
+        showStatus('bankLinkStatus', 'Running bank transaction sync...', 'success');
+        const response = await invokeEdgeFunction('sync-transactions', {});
+        const syncedCount = response.synced_count || 0;
+        const skippedCount = response.skipped_count || 0;
+        showStatus('bankLinkStatus', `Sync complete. Added ${syncedCount} new transaction(s), skipped ${skippedCount} existing item(s).`, 'success');
+        await loadBankConnections();
+        await loadAppData();
+    } catch (error) {
+        showStatus('bankLinkStatus', error.message || 'Bank sync failed.', 'error');
+    }
+}
+
+async function loadBankSupportDiagnostics() {
+    if (!isAdmin()) return;
+
+    const tbody = document.querySelector('#bankSupportTable tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center">Checking support...</td></tr>';
+
+    try {
+        const response = await invokeEdgeFunction('check-bank-support', {
+            institutions: BANK_LINKING.priorityInstitutions.map(inst => ({
+                name: inst.name,
+                aliases: inst.aliases
+            }))
+        });
+
+        const rows = response.results || [];
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center">No diagnostic data available.</td></tr>';
+            showStatus('bankSupportStatus', 'No support data returned.', 'error');
+            return;
+        }
+
+        tbody.innerHTML = rows.map((row) => `
+            <tr>
+                <td>${row.name}</td>
+                <td><span class="connection-status ${row.supported ? 'connected' : 'error'}">${row.supported ? 'supported' : 'unsupported'}</span></td>
+                <td>${row.matched_name || '-'}</td>
+                <td>${row.institution_id || '-'}</td>
+            </tr>
+        `).join('');
+
+        showStatus('bankSupportStatus', 'Diagnostics updated.', 'success');
+    } catch (error) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center">Diagnostics failed.</td></tr>';
+        showStatus('bankSupportStatus', error.message || 'Diagnostics failed.', 'error');
+    }
+}
+
+async function loadWebhookEvents() {
+    if (!isAdmin()) return;
+
+    const tbody = document.querySelector('#webhookEventsTable tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">Loading webhook events...</td></tr>';
+
+    try {
+        const response = await invokeEdgeFunction('get-webhook-events', {});
+        const events = response.events || [];
+
+        if (!events.length) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">No webhook events found.</td></tr>';
+            showStatus('webhookEventsStatus', 'No webhook events found.', 'success');
+            return;
+        }
+
+        tbody.innerHTML = events.map((event) => `
+            <tr>
+                <td>${formatDate(event.created_at)}</td>
+                <td>${event.webhook_type || '-'}</td>
+                <td>${event.webhook_code || '-'}</td>
+                <td><span class="connection-status ${event.status === 'processed' ? 'connected' : (event.status === 'received' ? 'pending' : 'error')}">${event.status || 'unknown'}</span></td>
+                <td>${event.plaid_item_id || '-'}</td>
+                <td>${event.error_message || '-'}</td>
+            </tr>
+        `).join('');
+
+        showStatus('webhookEventsStatus', 'Webhook events updated.', 'success');
+    } catch (error) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">Failed to load webhook events.</td></tr>';
+        showStatus('webhookEventsStatus', error.message || 'Failed to load webhook events.', 'error');
+    }
+}
+
+async function exchangePublicToken(publicToken, metadata, preferredInstitution) {
+    const institutionName = metadata?.institution?.name || preferredInstitution?.name || null;
+
+    showStatus('bankLinkStatus', `Linking ${institutionName || 'bank account'}...`, 'success');
+
+    try {
+        const response = await invokeEdgeFunction('exchange-public-token', {
+            public_token: publicToken,
+            institution_name: institutionName,
+            institution_id: metadata?.institution?.institution_id || null,
+            accounts: metadata?.accounts || []
+        });
+
+        const linkedName = response.institution_name || institutionName || 'bank account';
+        showStatus('bankLinkStatus', `Connected ${linkedName}. Initial sync started.`, 'success');
+        await loadBankConnections();
+    } catch (error) {
+        openManualImportFallback(institutionName, 'unknown', error.message);
+    }
+}
+
+function openManualImportFallback(institutionName, supportStatus = 'unknown', reason = '') {
+    const supportDetail = supportStatus === 'unsupported'
+        ? 'This institution was reported as unsupported by the current provider.'
+        : 'Automatic linking is temporarily unavailable.';
+
+    const reasonText = reason ? ` Details: ${reason}` : '';
+    const nameText = institutionName ? `${institutionName}: ` : '';
+    showStatus(
+        'bankLinkStatus',
+        `${nameText}${supportDetail} You can continue using JSON import below.${reasonText}`,
+        'error'
+    );
+
+    const importSectionButton = document.getElementById('importFile');
+    if (importSectionButton) {
+        importSectionButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 }
 
 // ===== QUICK ENTRY PAGE =====

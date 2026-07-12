@@ -1,0 +1,4 @@
+Migration setup.txt
+supabase/.temp/
+infra/cloudflare-plaid-webhook-proxy/.wrangler/
+infra/cloudflare-plaid-webhook-proxy/supabase/.temp/

@@ -1,0 +1,6 @@
+name = "money-manager-plaid-webhook-proxy"
+main = "worker.js"
+compatibility_date = "2026-07-12"
+
+[vars]
+# Non-sensitive values can go here if needed.
