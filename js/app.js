@@ -643,17 +643,10 @@ async function connectBank(preferredInstitution = null, options = {}) {
             received_redirect_uri: receivedRedirectUri
         });
 
-        if (createResponse && createResponse.ok === false) {
-            const debugText = createResponse.debug ? ` | debug=${JSON.stringify(createResponse.debug)}` : '';
-            const stageText = createResponse.stage ? ` | stage=${createResponse.stage}` : '';
-            throw new Error(`${createResponse.error || 'create-link-token failed'}${stageText}${debugText}`);
-        }
-
         const linkToken = createResponse.link_token;
         const supportStatus = createResponse.support_status || 'unknown';
         if (!linkToken) {
-            const responseDetails = `create-link-token response: ${JSON.stringify(createResponse || {})}`;
-            openManualImportFallback(bankName, supportStatus, responseDetails);
+            openManualImportFallback(bankName, supportStatus);
             return;
         }
 

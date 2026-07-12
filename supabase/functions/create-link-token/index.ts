@@ -14,15 +14,63 @@ type RequestPayload = {
   received_redirect_uri?: string | null;
 };
 
+type PlaidEndpointInfo = {
+  plaidEnvRaw: string;
+  plaidEnvNormalized: 'sandbox' | 'development' | 'production';
+  plaidBaseUrl: string;
+  plaidBaseUrlSource: 'PLAID_BASE_URL' | 'PLAID_ENV';
+};
+
+function resolvePlaidEndpoint(): PlaidEndpointInfo {
+  const rawEnv = (Deno.env.get('PLAID_ENV') || 'sandbox').trim().toLowerCase();
+  const overrideBaseUrl = (Deno.env.get('PLAID_BASE_URL') || '').trim();
+
+  if (overrideBaseUrl) {
+    return {
+      plaidEnvRaw: rawEnv || 'sandbox',
+      plaidEnvNormalized: rawEnv === 'production' || rawEnv === 'prod'
+        ? 'production'
+        : rawEnv === 'development' || rawEnv === 'dev'
+          ? 'development'
+          : 'sandbox',
+      plaidBaseUrl: overrideBaseUrl,
+      plaidBaseUrlSource: 'PLAID_BASE_URL'
+    };
+  }
+
+  const normalizedEnv: 'sandbox' | 'development' | 'production' =
+    rawEnv === 'production' || rawEnv === 'prod'
+      ? 'production'
+      : rawEnv === 'development' || rawEnv === 'dev'
+        ? 'development'
+        : 'sandbox';
+
+  const plaidBaseUrl = normalizedEnv === 'production'
+    ? 'https://production.plaid.com'
+    : normalizedEnv === 'development'
+      ? 'https://development.plaid.com'
+      : 'https://sandbox.plaid.com';
+
+  return {
+    plaidEnvRaw: rawEnv || 'sandbox',
+    plaidEnvNormalized: normalizedEnv,
+    plaidBaseUrl,
+    plaidBaseUrlSource: 'PLAID_ENV'
+  };
+}
+
 function getDebugInfo(payload: RequestPayload, authHeader: string | null) {
   const plaidClientId = Deno.env.get('PLAID_CLIENT_ID') || '';
   const plaidSecret = Deno.env.get('PLAID_SECRET') || '';
-  const plaidEnv = Deno.env.get('PLAID_ENV') || 'sandbox';
   const plaidWebhookUrl = Deno.env.get('PLAID_WEBHOOK_URL') || '';
   const plaidRedirectUri = Deno.env.get('PLAID_REDIRECT_URI') || '';
+  const endpoint = resolvePlaidEndpoint();
 
   return {
-    plaidEnv,
+    plaidEnv: endpoint.plaidEnvRaw,
+    plaidEnvNormalized: endpoint.plaidEnvNormalized,
+    plaidBaseUrl: endpoint.plaidBaseUrl,
+    plaidBaseUrlSource: endpoint.plaidBaseUrlSource,
     hasAuthHeader: Boolean(authHeader),
     hasPlaidClientId: Boolean(plaidClientId),
     plaidClientIdLength: plaidClientId.length,
@@ -47,19 +95,13 @@ function isMatch(name: string, aliases: string[]): boolean {
 async function plaidRequest(path: string, body: Record<string, unknown>) {
   const PLAID_CLIENT_ID = Deno.env.get('PLAID_CLIENT_ID');
   const PLAID_SECRET = Deno.env.get('PLAID_SECRET');
-  const PLAID_ENV = Deno.env.get('PLAID_ENV') || 'sandbox';
+  const endpoint = resolvePlaidEndpoint();
 
   if (!PLAID_CLIENT_ID || !PLAID_SECRET) {
     throw new Error('Missing PLAID_CLIENT_ID or PLAID_SECRET.');
   }
 
-  const baseUrl = PLAID_ENV === 'production'
-    ? 'https://production.plaid.com'
-    : PLAID_ENV === 'development'
-      ? 'https://development.plaid.com'
-      : 'https://sandbox.plaid.com';
-
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(`${endpoint.plaidBaseUrl}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -182,13 +224,9 @@ Deno.serve(async (req) => {
     });
 
     return new Response(JSON.stringify({
-      ok: false,
       error: (error as Error).message,
-      stage,
-      debug: debugInfo
     }), {
-      // Temporary debugging mode: return 200 so client always receives full payload.
-      status: 200,
+      status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
