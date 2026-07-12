@@ -504,7 +504,53 @@ async function invokeEdgeFunction(functionName, payload) {
     });
 
     if (error) {
-        throw new Error(error.message || `Failed to call function: ${functionName}`);
+        let details = '';
+        let statusDetails = '';
+
+        // Supabase wraps non-2xx function responses in error.context (a Response object).
+        if (error.context) {
+            statusDetails = error.context.status
+                ? `HTTP ${error.context.status}${error.context.statusText ? ` ${error.context.statusText}` : ''}`
+                : '';
+
+            try {
+                const cloned = error.context.clone();
+                const maybeJson = await cloned.json();
+
+                if (maybeJson && typeof maybeJson === 'object') {
+                    const parts = [];
+
+                    if (maybeJson.error) {
+                        parts.push(String(maybeJson.error));
+                    } else if (maybeJson.message) {
+                        parts.push(String(maybeJson.message));
+                    }
+
+                    if (maybeJson.stage) {
+                        parts.push(`stage=${String(maybeJson.stage)}`);
+                    }
+
+                    if (maybeJson.debug) {
+                        parts.push(`debug=${JSON.stringify(maybeJson.debug)}`);
+                    }
+
+                    details = parts.length ? parts.join(' | ') : JSON.stringify(maybeJson);
+                } else {
+                    details = String(maybeJson || '');
+                }
+            } catch (_jsonError) {
+                try {
+                    details = await error.context.text();
+                } catch (_textError) {
+                    details = '';
+                }
+            }
+        }
+
+        const baseMessage = error.message || `Failed to call function: ${functionName}`;
+
+        const contextMessage = [statusDetails, details].filter(Boolean).join(' | ');
+        throw new Error(contextMessage ? `${baseMessage}. ${contextMessage}` : baseMessage);
     }
 
     return data || {};
@@ -555,6 +601,18 @@ async function maybeResumePlaidOauth() {
     });
 }
 
+function getErrorMessage(error, fallbackMessage = 'Unknown error') {
+    if (!error) return fallbackMessage;
+    if (typeof error === 'string') return error;
+    if (typeof error.message === 'string' && error.message.trim()) return error.message;
+
+    try {
+        return JSON.stringify(error);
+    } catch (_stringifyError) {
+        return fallbackMessage;
+    }
+}
+
 async function connectBank(preferredInstitution = null, options = {}) {
     if (!requireEditPermission('bankLinkStatus')) return;
     if (!supabaseClient || !authState.user) {
@@ -585,10 +643,17 @@ async function connectBank(preferredInstitution = null, options = {}) {
             received_redirect_uri: receivedRedirectUri
         });
 
+        if (createResponse && createResponse.ok === false) {
+            const debugText = createResponse.debug ? ` | debug=${JSON.stringify(createResponse.debug)}` : '';
+            const stageText = createResponse.stage ? ` | stage=${createResponse.stage}` : '';
+            throw new Error(`${createResponse.error || 'create-link-token failed'}${stageText}${debugText}`);
+        }
+
         const linkToken = createResponse.link_token;
         const supportStatus = createResponse.support_status || 'unknown';
         if (!linkToken) {
-            openManualImportFallback(bankName, supportStatus);
+            const responseDetails = `create-link-token response: ${JSON.stringify(createResponse || {})}`;
+            openManualImportFallback(bankName, supportStatus, responseDetails);
             return;
         }
 
@@ -620,7 +685,7 @@ async function connectBank(preferredInstitution = null, options = {}) {
 
         handler.open();
     } catch (error) {
-        openManualImportFallback(preferredInstitution?.name, 'unknown', error.message);
+        openManualImportFallback(preferredInstitution?.name, 'unknown', getErrorMessage(error));
     }
 }
 
@@ -640,7 +705,7 @@ async function syncBankTransactions() {
         await loadBankConnections();
         await loadAppData();
     } catch (error) {
-        showStatus('bankLinkStatus', error.message || 'Bank sync failed.', 'error');
+        showStatus('bankLinkStatus', getErrorMessage(error, 'Bank sync failed.'), 'error');
     }
 }
 
@@ -679,7 +744,7 @@ async function loadBankSupportDiagnostics() {
         showStatus('bankSupportStatus', 'Diagnostics updated.', 'success');
     } catch (error) {
         tbody.innerHTML = '<tr><td colspan="4" style="text-align:center">Diagnostics failed.</td></tr>';
-        showStatus('bankSupportStatus', error.message || 'Diagnostics failed.', 'error');
+        showStatus('bankSupportStatus', getErrorMessage(error, 'Diagnostics failed.'), 'error');
     }
 }
 
@@ -715,7 +780,7 @@ async function loadWebhookEvents() {
         showStatus('webhookEventsStatus', 'Webhook events updated.', 'success');
     } catch (error) {
         tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">Failed to load webhook events.</td></tr>';
-        showStatus('webhookEventsStatus', error.message || 'Failed to load webhook events.', 'error');
+        showStatus('webhookEventsStatus', getErrorMessage(error, 'Failed to load webhook events.'), 'error');
     }
 }
 
@@ -736,7 +801,7 @@ async function exchangePublicToken(publicToken, metadata, preferredInstitution) 
         showStatus('bankLinkStatus', `Connected ${linkedName}. Initial sync started.`, 'success');
         await loadBankConnections();
     } catch (error) {
-        openManualImportFallback(institutionName, 'unknown', error.message);
+        openManualImportFallback(institutionName, 'unknown', getErrorMessage(error));
     }
 }
 

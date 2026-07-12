@@ -14,6 +14,27 @@ type RequestPayload = {
   received_redirect_uri?: string | null;
 };
 
+function getDebugInfo(payload: RequestPayload, authHeader: string | null) {
+  const plaidClientId = Deno.env.get('PLAID_CLIENT_ID') || '';
+  const plaidSecret = Deno.env.get('PLAID_SECRET') || '';
+  const plaidEnv = Deno.env.get('PLAID_ENV') || 'sandbox';
+  const plaidWebhookUrl = Deno.env.get('PLAID_WEBHOOK_URL') || '';
+  const plaidRedirectUri = Deno.env.get('PLAID_REDIRECT_URI') || '';
+
+  return {
+    plaidEnv,
+    hasAuthHeader: Boolean(authHeader),
+    hasPlaidClientId: Boolean(plaidClientId),
+    plaidClientIdLength: plaidClientId.length,
+    hasPlaidSecret: Boolean(plaidSecret),
+    plaidSecretLength: plaidSecret.length,
+    hasPlaidWebhookUrl: Boolean(plaidWebhookUrl),
+    hasPlaidRedirectUri: Boolean(plaidRedirectUri),
+    preferredInstitution: payload.preferred_institution_name || null,
+    hasReceivedRedirectUri: Boolean(payload.received_redirect_uri)
+  };
+}
+
 function normalize(value: string | null | undefined): string {
   return (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -61,15 +82,23 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  let stage = 'start';
+  let debugInfo: Record<string, unknown> = {};
+
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
     const authHeader = req.headers.get('Authorization') ?? '';
 
+    stage = 'parse_payload';
+    const payload = (await req.json().catch(() => ({}))) as RequestPayload;
+    debugInfo = getDebugInfo(payload, authHeader);
+
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } }
     });
 
+    stage = 'auth_get_user';
     const { data: authData, error: authError } = await supabase.auth.getUser();
     if (authError || !authData.user) {
       return new Response(JSON.stringify({ error: 'Unauthorized.' }), {
@@ -78,7 +107,6 @@ Deno.serve(async (req) => {
       });
     }
 
-    const payload = (await req.json().catch(() => ({}))) as RequestPayload;
     const preferredName = payload.preferred_institution_name || null;
     const preferredAliases = payload.preferred_institution_aliases || [];
     const receivedRedirectUri = payload.received_redirect_uri || null;
@@ -88,6 +116,7 @@ Deno.serve(async (req) => {
     let matchedInstitutionId: string | null = null;
 
     if (preferredName) {
+      stage = 'institutions_search';
       const search = await plaidRequest('/institutions/search', {
         query: preferredName,
         products: ['transactions'],
@@ -134,6 +163,7 @@ Deno.serve(async (req) => {
       linkPayload.institution_id = matchedInstitutionId;
     }
 
+    stage = 'link_token_create';
     const linkResponse = await plaidRequest('/link/token/create', linkPayload);
 
     return new Response(JSON.stringify({
@@ -145,8 +175,20 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    return new Response(JSON.stringify({ error: (error as Error).message }), {
-      status: 500,
+    console.error('create-link-token failed', {
+      stage,
+      error: (error as Error).message,
+      debugInfo
+    });
+
+    return new Response(JSON.stringify({
+      ok: false,
+      error: (error as Error).message,
+      stage,
+      debug: debugInfo
+    }), {
+      // Temporary debugging mode: return 200 so client always receives full payload.
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
