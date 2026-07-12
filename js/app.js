@@ -1255,9 +1255,14 @@ function calculateBalanceUpToDate(targetDate) {
     let balance = useLiveLinkedAnchor ? getLinkedCashAccountBalance() : state.startingBalance;
 
     state.transactions.forEach(txn => {
-        const occurrenceStart = useLiveLinkedAnchor && isBankLinkedTransaction(txn)
-            ? addDays(today, 1)
-            : historicalStartDate;
+        let occurrenceStart = historicalStartDate;
+
+        if (useLiveLinkedAnchor) {
+            occurrenceStart = isBankLinkedTransaction(txn)
+                ? addDays(today, 1)
+                : today;
+        }
+
         const occurrences = getOccurrences(txn, occurrenceStart, normalizedTargetDate);
         occurrences.forEach(() => {
             if (txn.type === 'Income') balance += txn.amount;
@@ -1283,12 +1288,17 @@ function calculateMonthSummary(year, month) {
     const prevDay = new Date(firstDay); prevDay.setDate(prevDay.getDate() - 1);
     const today = startOfDay(new Date());
     const isCurrentMonth = today >= startOfDay(firstDay) && today <= startOfDay(lastDay);
-    const rangeStart = hasLinkedCashAccountBalances() && isCurrentMonth
-        ? addDays(today, 1)
-        : firstDay;
     
     let income = 0, expenses = 0;
     state.transactions.forEach(txn => {
+        let rangeStart = firstDay;
+
+        if (hasLinkedCashAccountBalances() && isCurrentMonth) {
+            rangeStart = isBankLinkedTransaction(txn)
+                ? addDays(today, 1)
+                : today;
+        }
+
         const occurrences = getOccurrences(txn, rangeStart, lastDay);
         occurrences.forEach(() => {
             if (txn.type === 'Income') income += txn.amount;
@@ -1332,11 +1342,15 @@ function calculateAnnualSummary() {
         totalExpenses += summary.expenses;
     }
 
-    const categoryProjectionStart = hasLinkedCashAccountBalances()
-        ? addDays(today, 1)
-        : new Date(state.startDate);
-    
     state.transactions.forEach(txn => {
+        let categoryProjectionStart = new Date(state.startDate);
+
+        if (hasLinkedCashAccountBalances()) {
+            categoryProjectionStart = isBankLinkedTransaction(txn)
+                ? addDays(today, 1)
+                : today;
+        }
+
         const occurrences = getOccurrences(txn, categoryProjectionStart, new Date(startDate.getFullYear() + 1, startDate.getMonth(), startDate.getDate()));
         const total = occurrences.length * txn.amount;
         if (txn.type === 'Income') {
