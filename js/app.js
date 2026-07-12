@@ -209,17 +209,25 @@ async function finishSignIn() {
 async function loadAppData() {
     loadUiPreferences();
 
-    const [{ data: settings, error: settingsError }, { data: transactions, error: transactionsError }] = await Promise.all([
+    const [
+        { data: settings, error: settingsError },
+        { data: transactions, error: transactionsError },
+        { data: transactionLinks, error: transactionLinksError }
+    ] = await Promise.all([
         supabaseClient.from('settings').select('start_date, starting_balance').eq('id', 1).single(),
-        supabaseClient.from('transactions').select('*').order('start_date', { ascending: true }).order('id', { ascending: true })
+        supabaseClient.from('transactions').select('*').order('start_date', { ascending: true }).order('id', { ascending: true }),
+        supabaseClient.from('financial_transaction_links').select('app_transaction_id')
     ]);
 
     if (settingsError) throw settingsError;
     if (transactionsError) throw transactionsError;
+    if (transactionLinksError && transactionLinksError.code !== '42P01') throw transactionLinksError;
+
+    const linkedTransactionIds = new Set((transactionLinks || []).map(link => link.app_transaction_id));
 
     state.startDate = settings.start_date;
     state.startingBalance = Number(settings.starting_balance);
-    state.transactions = (transactions || []).map(fromDatabaseTransaction);
+    state.transactions = (transactions || []).map(txn => fromDatabaseTransaction(txn, linkedTransactionIds.has(txn.id)));
 
     await Promise.all([loadBankConnections(), loadBankAccounts()]);
 
@@ -245,7 +253,7 @@ function saveUiPreferences() {
     }));
 }
 
-function fromDatabaseTransaction(txn) {
+function fromDatabaseTransaction(txn, isBankLinked = false) {
     return {
         id: txn.id,
         description: txn.description,
@@ -254,7 +262,8 @@ function fromDatabaseTransaction(txn) {
         amount: Number(txn.amount),
         startDate: txn.start_date,
         frequency: txn.frequency,
-        endDate: txn.end_date
+        endDate: txn.end_date,
+        isBankLinked
     };
 }
 
@@ -512,6 +521,10 @@ function getLinkedCashAccountBalance() {
     return state.bankAccounts
         .filter(isIncludedBankBalanceAccount)
         .reduce((total, account) => total + getBankAccountBalance(account), 0);
+}
+
+function isBankLinkedTransaction(txn) {
+    return Boolean(txn?.isBankLinked);
 }
 
 function hasLinkedCashAccountBalances() {
@@ -1238,20 +1251,14 @@ function calculateBalanceUpToDate(targetDate) {
     const today = startOfDay(new Date());
     const historicalStartDate = startOfDay(new Date(state.startDate));
 
-    let start = historicalStartDate;
-    let balance = state.startingBalance;
-
-    if (hasLinkedCashAccountBalances() && normalizedTargetDate >= today) {
-        if (isSameDay(normalizedTargetDate, today)) {
-            return getLinkedCashAccountBalance();
-        }
-
-        start = addDays(today, 1);
-        balance = getLinkedCashAccountBalance();
-    }
+    const useLiveLinkedAnchor = hasLinkedCashAccountBalances() && normalizedTargetDate >= today;
+    let balance = useLiveLinkedAnchor ? getLinkedCashAccountBalance() : state.startingBalance;
 
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, start, normalizedTargetDate);
+        const occurrenceStart = useLiveLinkedAnchor && isBankLinkedTransaction(txn)
+            ? addDays(today, 1)
+            : historicalStartDate;
+        const occurrences = getOccurrences(txn, occurrenceStart, normalizedTargetDate);
         occurrences.forEach(() => {
             if (txn.type === 'Income') balance += txn.amount;
             else balance -= txn.amount;
@@ -1274,17 +1281,24 @@ function calculateMonthSummary(year, month) {
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
     const prevDay = new Date(firstDay); prevDay.setDate(prevDay.getDate() - 1);
+    const today = startOfDay(new Date());
+    const isCurrentMonth = today >= startOfDay(firstDay) && today <= startOfDay(lastDay);
+    const rangeStart = hasLinkedCashAccountBalances() && isCurrentMonth
+        ? addDays(today, 1)
+        : firstDay;
     
     let income = 0, expenses = 0;
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, firstDay, lastDay);
+        const occurrences = getOccurrences(txn, rangeStart, lastDay);
         occurrences.forEach(() => {
             if (txn.type === 'Income') income += txn.amount;
             else expenses += txn.amount;
         });
     });
     
-    const startBalance = calculateBalanceUpToDate(prevDay);
+    const startBalance = hasLinkedCashAccountBalances() && isCurrentMonth
+        ? calculateBalanceUpToDate(today)
+        : calculateBalanceUpToDate(prevDay);
     const endBalance = calculateBalanceUpToDate(lastDay);
     return { income, expenses, netFlow: income - expenses, startBalance, endBalance };
 }
@@ -1317,9 +1331,13 @@ function calculateAnnualSummary() {
         totalIncome += summary.income;
         totalExpenses += summary.expenses;
     }
+
+    const categoryProjectionStart = hasLinkedCashAccountBalances()
+        ? addDays(today, 1)
+        : new Date(state.startDate);
     
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, startDate, new Date(startDate.getFullYear() + 1, startDate.getMonth(), startDate.getDate()));
+        const occurrences = getOccurrences(txn, categoryProjectionStart, new Date(startDate.getFullYear() + 1, startDate.getMonth(), startDate.getDate()));
         const total = occurrences.length * txn.amount;
         if (txn.type === 'Income') {
             incomeByCategory[txn.category] = (incomeByCategory[txn.category] || 0) + total;
