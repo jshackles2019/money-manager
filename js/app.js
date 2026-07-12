@@ -38,6 +38,7 @@ let state = {
     startingBalance: 2316.00,
     transactions: [],
     bankConnections: [],
+    bankAccounts: [],
     currentMonth: new Date(2026, 5, 1),
     selectedDate: null
 };
@@ -220,7 +221,7 @@ async function loadAppData() {
     state.startingBalance = Number(settings.starting_balance);
     state.transactions = (transactions || []).map(fromDatabaseTransaction);
 
-    await loadBankConnections();
+    await Promise.all([loadBankConnections(), loadBankAccounts()]);
 
     document.getElementById('startDate').value = state.startDate;
     document.getElementById('startingBalance').value = state.startingBalance;
@@ -465,6 +466,56 @@ async function loadBankConnections() {
 
     state.bankConnections = data || [];
     renderBankConnections();
+}
+
+async function loadBankAccounts() {
+    if (!supabaseClient || !authState.user) {
+        state.bankAccounts = [];
+        return;
+    }
+
+    const { data, error } = await supabaseClient
+        .from('financial_accounts')
+        .select('id, name, type, subtype, current_balance, available_balance')
+        .order('name', { ascending: true });
+
+    if (error) {
+        if (error.code === '42P01') {
+            state.bankAccounts = [];
+            return;
+        }
+
+        showStatus('bankLinkStatus', error.message, 'error');
+        state.bankAccounts = [];
+        return;
+    }
+
+    state.bankAccounts = data || [];
+}
+
+function isIncludedBankBalanceAccount(account) {
+    const subtype = String(account?.subtype || '').toLowerCase();
+    return subtype === 'checking' || subtype === 'savings';
+}
+
+function getBankAccountBalance(account) {
+    const currentBalance = Number(account?.current_balance);
+    if (Number.isFinite(currentBalance)) {
+        return currentBalance;
+    }
+
+    const availableBalance = Number(account?.available_balance);
+    return Number.isFinite(availableBalance) ? availableBalance : 0;
+}
+
+function getLinkedCashAccountBalance() {
+    return state.bankAccounts
+        .filter(isIncludedBankBalanceAccount)
+        .reduce((total, account) => total + getBankAccountBalance(account), 0);
+}
+
+function getEffectiveStartingBalance() {
+    return state.startingBalance + getLinkedCashAccountBalance();
 }
 
 function renderBankConnections() {
@@ -793,6 +844,8 @@ async function exchangePublicToken(publicToken, metadata, preferredInstitution) 
         const linkedName = response.institution_name || institutionName || 'bank account';
         showStatus('bankLinkStatus', `Connected ${linkedName}. Initial sync started.`, 'success');
         await loadBankConnections();
+        await loadBankAccounts();
+        renderAll();
     } catch (error) {
         openManualImportFallback(institutionName, 'unknown', getErrorMessage(error));
     }
@@ -921,7 +974,7 @@ function renderCalendar() {
     
     for (let day = 1; day <= daysInMonth; day++) {
         const date = new Date(year, month, day);
-        const balance = dailyBalances[day] || state.startingBalance;
+        const balance = dailyBalances[day] ?? getEffectiveStartingBalance();
         const isToday = date.toDateString() === today.toDateString();
         const isSelected = state.selectedDate && date.toDateString() === new Date(state.selectedDate).toDateString();
         
@@ -992,7 +1045,7 @@ let charts = {};
 function renderDashboard() {
     const summary = calculateAnnualSummary();
     
-    document.getElementById('dashStartBalance').textContent = formatCurrency(state.startingBalance);
+    document.getElementById('dashStartBalance').textContent = formatCurrency(getEffectiveStartingBalance());
     document.getElementById('dashTotalIncome').textContent = formatCurrency(summary.totalIncome);
     document.getElementById('dashTotalExpenses').textContent = formatCurrency(summary.totalExpenses);
     document.getElementById('dashNetFlow').textContent = formatCurrency(summary.netFlow);
@@ -1160,7 +1213,7 @@ function getNextDate(date, frequency) {
 
 function calculateBalanceUpToDate(targetDate) {
     const start = new Date(state.startDate);
-    let balance = state.startingBalance;
+    let balance = getEffectiveStartingBalance();
     state.transactions.forEach(txn => {
         const occurrences = getOccurrences(txn, start, targetDate);
         occurrences.forEach(() => {
@@ -1205,7 +1258,7 @@ function calculateAnnualSummary() {
     const months = [];
     let totalIncome = 0, totalExpenses = 0;
     const incomeByCategory = {}, expensesByCategory = {};
-    let runningBalance = state.startingBalance;
+    let runningBalance = getEffectiveStartingBalance();
     
     for (let i = 0; i < 12; i++) {
         const date = new Date(startDate);
@@ -1238,7 +1291,7 @@ function calculateAnnualSummary() {
     return {
         totalIncome, totalExpenses,
         netFlow: totalIncome - totalExpenses,
-        endBalance: state.startingBalance + totalIncome - totalExpenses,
+        endBalance: getEffectiveStartingBalance() + totalIncome - totalExpenses,
         avgSavings: (totalIncome - totalExpenses) / 12,
         months, incomeByCategory, expensesByCategory
     };
