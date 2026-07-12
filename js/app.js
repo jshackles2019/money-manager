@@ -514,8 +514,30 @@ function getLinkedCashAccountBalance() {
         .reduce((total, account) => total + getBankAccountBalance(account), 0);
 }
 
+function hasLinkedCashAccountBalances() {
+    return state.bankAccounts.some(isIncludedBankBalanceAccount);
+}
+
 function getEffectiveStartingBalance() {
-    return state.startingBalance + getLinkedCashAccountBalance();
+    return hasLinkedCashAccountBalances()
+        ? getLinkedCashAccountBalance()
+        : state.startingBalance;
+}
+
+function startOfDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addDays(date, days) {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return next;
+}
+
+function isSameDay(left, right) {
+    return left.getFullYear() === right.getFullYear()
+        && left.getMonth() === right.getMonth()
+        && left.getDate() === right.getDate();
 }
 
 function renderBankConnections() {
@@ -1212,10 +1234,24 @@ function getNextDate(date, frequency) {
 }
 
 function calculateBalanceUpToDate(targetDate) {
-    const start = new Date(state.startDate);
-    let balance = getEffectiveStartingBalance();
+    const normalizedTargetDate = startOfDay(targetDate);
+    const today = startOfDay(new Date());
+    const historicalStartDate = startOfDay(new Date(state.startDate));
+
+    let start = historicalStartDate;
+    let balance = state.startingBalance;
+
+    if (hasLinkedCashAccountBalances() && normalizedTargetDate >= today) {
+        if (isSameDay(normalizedTargetDate, today)) {
+            return getLinkedCashAccountBalance();
+        }
+
+        start = addDays(today, 1);
+        balance = getLinkedCashAccountBalance();
+    }
+
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, start, targetDate);
+        const occurrences = getOccurrences(txn, start, normalizedTargetDate);
         occurrences.forEach(() => {
             if (txn.type === 'Income') balance += txn.amount;
             else balance -= txn.amount;
@@ -1249,16 +1285,21 @@ function calculateMonthSummary(year, month) {
     });
     
     const startBalance = calculateBalanceUpToDate(prevDay);
-    const endBalance = startBalance + income - expenses;
+    const endBalance = calculateBalanceUpToDate(lastDay);
     return { income, expenses, netFlow: income - expenses, startBalance, endBalance };
 }
 
 function calculateAnnualSummary() {
-    const startDate = new Date(state.startDate);
+    const today = startOfDay(new Date());
+    const startDate = hasLinkedCashAccountBalances()
+        ? new Date(today.getFullYear(), today.getMonth(), 1)
+        : new Date(state.startDate);
     const months = [];
     let totalIncome = 0, totalExpenses = 0;
     const incomeByCategory = {}, expensesByCategory = {};
-    let runningBalance = getEffectiveStartingBalance();
+    let startingBalance = hasLinkedCashAccountBalances()
+        ? getLinkedCashAccountBalance()
+        : state.startingBalance;
     
     for (let i = 0; i < 12; i++) {
         const date = new Date(startDate);
@@ -1266,12 +1307,11 @@ function calculateAnnualSummary() {
         const year = date.getFullYear();
         const month = date.getMonth();
         const summary = calculateMonthSummary(year, month);
-        runningBalance += summary.netFlow;
         
         months.push({
             name: new Date(year, month).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
             ...summary,
-            endBalance: runningBalance
+            endBalance: summary.endBalance
         });
         
         totalIncome += summary.income;
@@ -1279,7 +1319,7 @@ function calculateAnnualSummary() {
     }
     
     state.transactions.forEach(txn => {
-        const occurrences = getOccurrences(txn, new Date(state.startDate), new Date(startDate.getFullYear() + 1, startDate.getMonth(), startDate.getDate()));
+        const occurrences = getOccurrences(txn, startDate, new Date(startDate.getFullYear() + 1, startDate.getMonth(), startDate.getDate()));
         const total = occurrences.length * txn.amount;
         if (txn.type === 'Income') {
             incomeByCategory[txn.category] = (incomeByCategory[txn.category] || 0) + total;
@@ -1291,7 +1331,7 @@ function calculateAnnualSummary() {
     return {
         totalIncome, totalExpenses,
         netFlow: totalIncome - totalExpenses,
-        endBalance: getEffectiveStartingBalance() + totalIncome - totalExpenses,
+        endBalance: months.length ? months[months.length - 1].endBalance : startingBalance,
         avgSavings: (totalIncome - totalExpenses) / 12,
         months, incomeByCategory, expensesByCategory
     };
