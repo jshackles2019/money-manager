@@ -11,6 +11,7 @@ type RequestPayload = {
   preferred_institution_name?: string | null;
   preferred_institution_aliases?: string[];
   priority_institutions?: PriorityInstitution[];
+  received_redirect_uri?: string | null;
 };
 
 function normalize(value: string | null | undefined): string {
@@ -80,6 +81,8 @@ Deno.serve(async (req) => {
     const payload = (await req.json().catch(() => ({}))) as RequestPayload;
     const preferredName = payload.preferred_institution_name || null;
     const preferredAliases = payload.preferred_institution_aliases || [];
+    const receivedRedirectUri = payload.received_redirect_uri || null;
+    const plaidRedirectUri = Deno.env.get('PLAID_REDIRECT_URI') || null;
 
     let supportStatus: 'supported' | 'unsupported' | 'unknown' = 'unknown';
     let matchedInstitutionId: string | null = null;
@@ -114,6 +117,18 @@ Deno.serve(async (req) => {
       products: ['transactions'],
       webhook: Deno.env.get('PLAID_WEBHOOK_URL') || undefined
     };
+
+    if (plaidRedirectUri) {
+      linkPayload.redirect_uri = plaidRedirectUri;
+    }
+
+    if (receivedRedirectUri) {
+      if (!plaidRedirectUri) {
+        throw new Error('PLAID_REDIRECT_URI secret is required to resume OAuth redirect flows.');
+      }
+
+      linkPayload.received_redirect_uri = receivedRedirectUri;
+    }
 
     if (matchedInstitutionId) {
       linkPayload.institution_id = matchedInstitutionId;

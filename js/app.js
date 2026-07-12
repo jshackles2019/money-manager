@@ -194,6 +194,9 @@ async function finishSignIn() {
         await loadProfile();
         await loadAppData();
         showApp();
+
+        // If Plaid redirected back after OAuth, resume Link using received_redirect_uri.
+        await maybeResumePlaidOauth();
     } catch (error) {
         authState.profile = null;
         showAuthPage();
@@ -517,7 +520,42 @@ async function connectPriorityBank(bankKey) {
     await connectBank(institution);
 }
 
-async function connectBank(preferredInstitution = null) {
+function getPlaidOauthResumeUrl() {
+    const url = new URL(window.location.href);
+    const hasOauthState = url.searchParams.has('oauth_state_id');
+    return hasOauthState ? window.location.href : null;
+}
+
+function clearPlaidOauthQueryParams() {
+    const url = new URL(window.location.href);
+    const keys = ['oauth_state_id', 'error', 'error_code', 'error_message', 'link_session_id'];
+    let changed = false;
+
+    keys.forEach((key) => {
+        if (url.searchParams.has(key)) {
+            url.searchParams.delete(key);
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        const next = `${url.pathname}${url.search}${url.hash}`;
+        window.history.replaceState({}, document.title, next);
+    }
+}
+
+async function maybeResumePlaidOauth() {
+    const resumeUrl = getPlaidOauthResumeUrl();
+    if (!resumeUrl) return;
+
+    showStatus('bankLinkStatus', 'Resuming bank authentication...', 'success');
+    await connectBank(null, {
+        receivedRedirectUri: resumeUrl,
+        isOauthResume: true
+    });
+}
+
+async function connectBank(preferredInstitution = null, options = {}) {
     if (!requireEditPermission('bankLinkStatus')) return;
     if (!supabaseClient || !authState.user) {
         showStatus('bankLinkStatus', 'Sign in before connecting a bank.', 'error');
@@ -531,12 +569,20 @@ async function connectBank(preferredInstitution = null) {
 
     try {
         const bankName = preferredInstitution?.name;
-        showStatus('bankLinkStatus', bankName ? `Preparing secure link for ${bankName}...` : 'Preparing secure bank link...', 'success');
+        const receivedRedirectUri = options.receivedRedirectUri || null;
+        const isOauthResume = Boolean(options.isOauthResume);
+
+        if (isOauthResume) {
+            showStatus('bankLinkStatus', 'Finalizing bank OAuth authentication...', 'success');
+        } else {
+            showStatus('bankLinkStatus', bankName ? `Preparing secure link for ${bankName}...` : 'Preparing secure bank link...', 'success');
+        }
 
         const createResponse = await invokeEdgeFunction('create-link-token', {
             preferred_institution_name: bankName || null,
             preferred_institution_aliases: preferredInstitution?.aliases || [],
-            priority_institutions: BANK_LINKING.priorityInstitutions
+            priority_institutions: BANK_LINKING.priorityInstitutions,
+            received_redirect_uri: receivedRedirectUri
         });
 
         const linkToken = createResponse.link_token;
@@ -553,9 +599,12 @@ async function connectBank(preferredInstitution = null) {
         const handler = window.Plaid.create({
             token: linkToken,
             onSuccess: async (publicToken, metadata) => {
+                clearPlaidOauthQueryParams();
                 await exchangePublicToken(publicToken, metadata, preferredInstitution);
             },
             onExit: (_err, metadata) => {
+                clearPlaidOauthQueryParams();
+
                 if (metadata?.status === 'institution_not_found') {
                     openManualImportFallback(bankName, 'unsupported');
                     return;
@@ -564,6 +613,10 @@ async function connectBank(preferredInstitution = null) {
                 showStatus('bankLinkStatus', 'Bank linking was canceled.', 'error');
             }
         });
+
+        if (isOauthResume) {
+            clearPlaidOauthQueryParams();
+        }
 
         handler.open();
     } catch (error) {
