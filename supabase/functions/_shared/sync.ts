@@ -1,6 +1,11 @@
 import { plaidRequest } from './plaid.ts';
 import { decryptAccessToken } from './crypto.ts';
 
+type FinancialAccountRow = {
+  id: number;
+  subtype: string | null;
+};
+
 function mapPlaidToAppTransaction(txn: Record<string, unknown>) {
   const amount = Number(txn.amount || 0);
   const isIncome = amount < 0;
@@ -48,6 +53,164 @@ function mapPlaidToAppTransaction(txn: Record<string, unknown>) {
   };
 }
 
+function isCheckingAccount(account: FinancialAccountRow | null) {
+  return String(account?.subtype || '').toLowerCase() === 'checking';
+}
+
+function shouldProjectToAppTransaction(txn: Record<string, unknown>, account: FinancialAccountRow | null) {
+  return isCheckingAccount(account) && !Boolean(txn.pending);
+}
+
+async function getFinancialAccountByPlaidId(
+  adminClient: any,
+  userId: string,
+  plaidAccountId: string
+): Promise<FinancialAccountRow | null> {
+  const { data: accountRow, error } = await adminClient
+    .from('financial_accounts')
+    .select('id, subtype')
+    .eq('user_id', userId)
+    .eq('plaid_account_id', plaidAccountId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return accountRow || null;
+}
+
+async function upsertFinancialTransactionRecord(
+  adminClient: any,
+  userId: string,
+  itemId: number,
+  plaidTransactionId: string,
+  accountId: number | null,
+  plaidTxn: Record<string, unknown>
+) {
+  const { error } = await adminClient
+    .from('financial_transactions')
+    .upsert({
+      user_id: userId,
+      item_id: itemId,
+      plaid_transaction_id: plaidTransactionId,
+      account_id: accountId,
+      amount: Number(plaidTxn.amount || 0),
+      date: String(plaidTxn.date || new Date().toISOString().slice(0, 10)),
+      name: String(plaidTxn.name || plaidTxn.merchant_name || 'Bank transaction'),
+      merchant_name: plaidTxn.merchant_name ? String(plaidTxn.merchant_name) : null,
+      category: plaidTxn.category ? plaidTxn.category : null,
+      pending: Boolean(plaidTxn.pending),
+      raw: plaidTxn,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id,plaid_transaction_id' });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+async function deleteLinkedAppTransaction(
+  adminClient: any,
+  userId: string,
+  plaidTransactionId: string
+) {
+  const { data: linkRow, error: linkError } = await adminClient
+    .from('financial_transaction_links')
+    .select('id, app_transaction_id')
+    .eq('user_id', userId)
+    .eq('plaid_transaction_id', plaidTransactionId)
+    .maybeSingle();
+
+  if (linkError) {
+    throw new Error(linkError.message);
+  }
+
+  if (!linkRow) return false;
+
+  const { error: deleteTxnError } = await adminClient
+    .from('transactions')
+    .delete()
+    .eq('id', linkRow.app_transaction_id);
+
+  if (deleteTxnError) {
+    throw new Error(deleteTxnError.message);
+  }
+
+  const { error: deleteLinkError } = await adminClient
+    .from('financial_transaction_links')
+    .delete()
+    .eq('id', linkRow.id);
+
+  if (deleteLinkError) {
+    throw new Error(deleteLinkError.message);
+  }
+
+  return true;
+}
+
+async function upsertLinkedAppTransaction(
+  adminClient: any,
+  userId: string,
+  plaidTransactionId: string,
+  appTxn: Record<string, unknown>
+) {
+  const { data: existingLink, error: linkError } = await adminClient
+    .from('financial_transaction_links')
+    .select('id, app_transaction_id')
+    .eq('user_id', userId)
+    .eq('plaid_transaction_id', plaidTransactionId)
+    .maybeSingle();
+
+  if (linkError) {
+    throw new Error(linkError.message);
+  }
+
+  if (existingLink?.app_transaction_id) {
+    const { error: updateError } = await adminClient
+      .from('transactions')
+      .update({
+        ...appTxn,
+        updated_by: userId
+      })
+      .eq('id', existingLink.app_transaction_id);
+
+    if (updateError) {
+      throw new Error(updateError.message);
+    }
+
+    return { created: false };
+  }
+
+  const { data: insertedAppTxn, error: appTxnError } = await adminClient
+    .from('transactions')
+    .insert({
+      ...appTxn,
+      created_by: userId,
+      updated_by: userId
+    })
+    .select('id')
+    .single();
+
+  if (appTxnError || !insertedAppTxn) {
+    throw new Error(appTxnError?.message || 'Unable to create app transaction from Plaid data.');
+  }
+
+  const { error: createLinkError } = await adminClient
+    .from('financial_transaction_links')
+    .insert({
+      user_id: userId,
+      plaid_transaction_id: plaidTransactionId,
+      app_transaction_id: insertedAppTxn.id
+    });
+
+  if (createLinkError) {
+    throw new Error(createLinkError.message);
+  }
+
+  return { created: true };
+}
+
 export async function syncItemTransactions(
   adminClient: any,
   userId: string,
@@ -67,28 +230,14 @@ export async function syncItemTransactions(
     });
 
     const added = Array.isArray(syncResponse?.added) ? syncResponse.added : [];
+    const modified = Array.isArray(syncResponse?.modified) ? syncResponse.modified : [];
     const removed = Array.isArray(syncResponse?.removed) ? syncResponse.removed : [];
 
     for (const removedTxn of removed) {
       const plaidTransactionId = String(removedTxn.transaction_id || '');
       if (!plaidTransactionId) continue;
 
-      const { data: linkRow } = await adminClient
-        .from('financial_transaction_links')
-        .select('app_transaction_id')
-        .eq('user_id', userId)
-        .eq('plaid_transaction_id', plaidTransactionId)
-        .maybeSingle();
-
-      if (linkRow?.app_transaction_id) {
-        await adminClient.from('transactions').delete().eq('id', linkRow.app_transaction_id);
-      }
-
-      await adminClient
-        .from('financial_transaction_links')
-        .delete()
-        .eq('user_id', userId)
-        .eq('plaid_transaction_id', plaidTransactionId);
+      await deleteLinkedAppTransaction(adminClient, userId, plaidTransactionId);
 
       await adminClient
         .from('financial_transactions')
@@ -101,70 +250,38 @@ export async function syncItemTransactions(
       const plaidTransactionId = String(plaidTxn.transaction_id || '');
       if (!plaidTransactionId) continue;
 
-      const { data: existingLink } = await adminClient
-        .from('financial_transaction_links')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('plaid_transaction_id', plaidTransactionId)
-        .maybeSingle();
+      const accountRow = await getFinancialAccountByPlaidId(adminClient, userId, String(plaidTxn.account_id || ''));
+      await upsertFinancialTransactionRecord(adminClient, userId, item.id, plaidTransactionId, accountRow?.id || null, plaidTxn);
 
-      if (existingLink) {
+      const appTxn = mapPlaidToAppTransaction(plaidTxn);
+      if (!shouldProjectToAppTransaction(plaidTxn, accountRow)) {
+        await deleteLinkedAppTransaction(adminClient, userId, plaidTransactionId);
         skippedCount += 1;
         continue;
       }
 
-      const { data: accountRow } = await adminClient
-        .from('financial_accounts')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('plaid_account_id', String(plaidTxn.account_id || ''))
-        .maybeSingle();
+      const appSyncResult = await upsertLinkedAppTransaction(adminClient, userId, plaidTransactionId, appTxn);
+      if (appSyncResult.created) {
+        syncedCount += 1;
+      } else {
+        skippedCount += 1;
+      }
+    }
 
-      await adminClient
-        .from('financial_transactions')
-        .upsert({
-          user_id: userId,
-          item_id: item.id,
-          plaid_transaction_id: plaidTransactionId,
-          account_id: accountRow?.id || null,
-          amount: Number(plaidTxn.amount || 0),
-          date: String(plaidTxn.date || new Date().toISOString().slice(0, 10)),
-          name: String(plaidTxn.name || plaidTxn.merchant_name || 'Bank transaction'),
-          merchant_name: plaidTxn.merchant_name ? String(plaidTxn.merchant_name) : null,
-          category: plaidTxn.category ? plaidTxn.category : null,
-          pending: Boolean(plaidTxn.pending),
-          raw: plaidTxn,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id,plaid_transaction_id' });
+    for (const plaidTxn of modified) {
+      const plaidTransactionId = String(plaidTxn.transaction_id || '');
+      if (!plaidTransactionId) continue;
+
+      const accountRow = await getFinancialAccountByPlaidId(adminClient, userId, String(plaidTxn.account_id || ''));
+      await upsertFinancialTransactionRecord(adminClient, userId, item.id, plaidTransactionId, accountRow?.id || null, plaidTxn);
+
+      if (!shouldProjectToAppTransaction(plaidTxn, accountRow)) {
+        await deleteLinkedAppTransaction(adminClient, userId, plaidTransactionId);
+        continue;
+      }
 
       const appTxn = mapPlaidToAppTransaction(plaidTxn);
-      const { data: insertedAppTxn, error: appTxnError } = await adminClient
-        .from('transactions')
-        .insert({
-          ...appTxn,
-          created_by: userId,
-          updated_by: userId
-        })
-        .select('id')
-        .single();
-
-      if (appTxnError || !insertedAppTxn) {
-        throw new Error(appTxnError?.message || 'Unable to create app transaction from Plaid data.');
-      }
-
-      const { error: linkError } = await adminClient
-        .from('financial_transaction_links')
-        .insert({
-          user_id: userId,
-          plaid_transaction_id: plaidTransactionId,
-          app_transaction_id: insertedAppTxn.id
-        });
-
-      if (linkError) {
-        throw new Error(linkError.message);
-      }
-
-      syncedCount += 1;
+      await upsertLinkedAppTransaction(adminClient, userId, plaidTransactionId, appTxn);
     }
 
     cursor = String(syncResponse?.next_cursor || cursor || '');
