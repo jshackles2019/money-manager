@@ -1262,9 +1262,7 @@ function calculateBalanceUpToDate(targetDate) {
         let occurrenceStart = historicalStartDate;
 
         if (useLiveLinkedAnchor) {
-            occurrenceStart = isBankLinkedTransaction(txn)
-                ? addDays(today, 1)
-                : today;
+            occurrenceStart = addDays(today, 1);
         }
 
         const occurrences = getOccurrences(txn, occurrenceStart, normalizedTargetDate);
