@@ -288,6 +288,24 @@ export async function syncItemTransactions(
     hasMore = Boolean(syncResponse?.has_more);
   }
 
+  const accountsResponse = await plaidRequest('/accounts/get', { access_token: accessToken });
+  const plaidAccounts = Array.isArray(accountsResponse?.accounts) ? accountsResponse.accounts : [];
+
+  for (const account of plaidAccounts) {
+    const plaidAccountId = String(account.account_id || '');
+    if (!plaidAccountId) continue;
+
+    await adminClient
+      .from('financial_accounts')
+      .update({
+        current_balance: account.balances?.current != null ? Number(account.balances.current) : null,
+        available_balance: account.balances?.available != null ? Number(account.balances.available) : null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', userId)
+      .eq('plaid_account_id', plaidAccountId);
+  }
+
   const { error: updateError } = await adminClient
     .from('financial_items')
     .update({

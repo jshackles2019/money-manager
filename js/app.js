@@ -508,10 +508,14 @@ function isIncludedBankBalanceAccount(account) {
 }
 
 function getBankAccountBalance(account) {
-    const currentBalance = Number(account?.current_balance);
-    if (Number.isFinite(currentBalance)) {
-        return currentBalance;
+    const subtype = String(account?.subtype || '').toLowerCase();
+    if (subtype === 'checking') {
+        const availableBalance = Number(account?.available_balance);
+        if (Number.isFinite(availableBalance)) return availableBalance;
     }
+
+    const currentBalance = Number(account?.current_balance);
+    if (Number.isFinite(currentBalance)) return currentBalance;
 
     const availableBalance = Number(account?.available_balance);
     return Number.isFinite(availableBalance) ? availableBalance : 0;
@@ -1258,9 +1262,7 @@ function calculateBalanceUpToDate(targetDate) {
         let occurrenceStart = historicalStartDate;
 
         if (useLiveLinkedAnchor) {
-            occurrenceStart = isBankLinkedTransaction(txn)
-                ? addDays(today, 1)
-                : today;
+            occurrenceStart = addDays(today, 1);
         }
 
         const occurrences = getOccurrences(txn, occurrenceStart, normalizedTargetDate);
